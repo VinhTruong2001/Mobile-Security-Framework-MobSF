@@ -172,6 +172,8 @@
             }
             // Response Handler     
             function responseHandler(json, isbutton) {
+                console.log("🚀 ~ responseHandler ~ json:", json)
+                
                 if (json.status === 'error') {
                     _("status").innerText = json.description;
                 } else {
@@ -235,28 +237,69 @@
                 return false;
           }
          // File Upload
-         function uploadFile(file, i) {
-           try {
-                if (!isValidExt(file.name) || !isValidMime(file.type)){
-                    return;
+         
+    const chunkSize = 100 * 1024 * 1024; // 100MB
+    const uploadButton = document.getElementById('uploadFile');
+
+    function uploadFile(file) {
+        
+        if (!isValidExt(file.name) || !isValidMime(file.type)) {
+            return;
+        }
+
+        _("progressBar").style.visibility = "visible";
+        let currentChunk = 0;
+        const totalChunks = Math.ceil(file.size / chunkSize);
+
+        function uploadNextChunk() {
+            console.log("🚀 ~ uploadNextChunk ~ file.name:", file.name)
+            const start = currentChunk * chunkSize;
+            const end = Math.min(start + chunkSize, file.size);
+            const chunk = file.slice(start, end);
+
+            const formData = new FormData();
+            formData.append("file", chunk);
+            formData.append("chunk", currentChunk);
+            formData.append("totalChunks", totalChunks);
+            formData.append("fileName", file.name);
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '{% url "upload" %}', true);
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.setRequestHeader("X-CSRFToken", '{{ csrf_token }}');
+
+            xhr.upload.addEventListener("progress", event => {
+                const percent = (event.loaded / event.total) * 100;
+                _("progressBar").value = (currentChunk / totalChunks * 100) + (percent / totalChunks);
+                _("status").innerText = `Uploading... ${Math.round(_("progressBar").value)}%`;
+            }, false);
+
+            xhr.addEventListener("load", () => {
+                if (xhr.status === 200) {
+                    const response = JSON.parse(xhr.responseText);
+                    if (response.status === 'in_progress') {
+                        currentChunk++;
+                        if (currentChunk < totalChunks) {
+                            uploadNextChunk();
+                        }
+                    } else if (response.status === 'success') {
+                        _("status").innerText = "Upload complete";
+                        // Handle completed upload, e.g., start analysis
+                        responseHandler(response);
+                    }
+                } else {
+                    _("status").innerText = "Upload Failed!";
                 }
-                _("progressBar").style.visibility = "visible";
-                var url = '{% url "upload" %}'
-                var xhr = new XMLHttpRequest()
-                xhr.open('POST', url, true)
-                xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest')
-                xhr.setRequestHeader("X-CSRFToken", '{{ csrf_token }}');
-                xhr.upload.addEventListener("progress", progressHandler, false);
-                xhr.addEventListener("load", completeHandler, false);
-                xhr.addEventListener("error", errorHandler, false);
-                xhr.addEventListener("abort", abortHandler, false);
-                var formdata = new FormData();
-                formdata.append("file", file);
-                xhr.send(formdata)
-            } catch (e) {
-                alert("Error:" + e);
-            }
-           }
+            });
+
+            xhr.addEventListener("error", errorHandler, false);
+            xhr.addEventListener("abort", abortHandler, false);
+
+            xhr.send(formData);
+        }
+
+        uploadNextChunk();
+    }
          
            function handleFiles(files) {
                files = [...files]
