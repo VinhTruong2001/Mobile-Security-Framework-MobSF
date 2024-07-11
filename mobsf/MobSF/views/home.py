@@ -73,6 +73,11 @@ def index(request):
     return render(request, template, context)
 
 
+CHUNK_UPLOAD_DIR = os.path.join(settings.UPLD_DIR, 'chunks')
+if not os.path.exists(CHUNK_UPLOAD_DIR):
+    os.makedirs(CHUNK_UPLOAD_DIR)
+
+
 class Upload(object):
     """Handle File Upload based on App type."""
 
@@ -114,21 +119,15 @@ class Upload(object):
             return self.resp_json(response_data)
 
         self.file = request.FILES['file']
-        self.file_type = FileType(self.file)
-        if not self.file_type.is_allow_file():
-            msg = 'File format not Supported!'
-            logger.error(msg)
-            response_data['description'] = msg
-            return self.resp_json(response_data)
-
-        if self.file_type.is_ipa():
-            if platform.system() not in LINUX_PLATFORM:
-                msg = 'Static Analysis of iOS IPA requires Mac or Linux'
-                logger.error(msg)
-                response_data['description'] = msg
-                return self.resp_json(response_data)
-
-        response_data = self.upload()
+        if 'chunk' in request.POST:
+            response_data = self.handle_chunked_upload()
+        else:
+            file_path = handle_uploaded_file(self.file, self.file.name)
+            # Open the uploaded file for scanning
+            self.file = open(file_path, 'rb')
+            self.file.content_type = self.get_content_type(self.file.name)
+            self.file_type = FileType(self.file)
+            response_data = self.upload()
         return self.resp_json(response_data)
 
     def upload_api(self):
@@ -138,20 +137,79 @@ class Upload(object):
         if not self.form.is_valid():
             api_response['error'] = FormUtil.errors_message(self.form)
             return api_response, HTTP_BAD_REQUEST
+
         self.file = request.FILES['file']
+        if 'chunk' in request.POST:
+            response_data = self.handle_chunked_upload()
+            return response_data, 200 if response_data['status'] == 'completed' else HTTP_BAD_REQUEST
+
+        file_path = handle_uploaded_file(self.file, self.file.name)
+        # Open the uploaded file for scanning
+        self.file = open(file_path, 'rb')
+        self.file.content_type = self.get_content_type(self.file.name)
         self.file_type = FileType(self.file)
-        if not self.file_type.is_allow_file():
-            api_response['error'] = 'File format not Supported!'
-            return api_response, HTTP_BAD_REQUEST
         api_response = self.upload()
         return api_response, 200
 
-    def upload(self):
+    def handle_chunked_upload(self):
         request = self.request
-        scanning = Scanning(request)
+        chunk = request.FILES['file']
+        chunk_index = int(request.POST['chunk'])
+        total_chunks = int(request.POST['totalChunks'])
+        file_name = request.POST['fileName']
+        print("🚀 ~ request.POST['fileName']:", request.POST['fileName'])
+
+        # Store chunks in a temporary directory
+        chunk_file_path = os.path.join(
+            CHUNK_UPLOAD_DIR, f'{file_name}.part{chunk_index}')
+        with open(chunk_file_path, 'wb+') as destination:
+            for chunk_data in chunk.chunks():
+                destination.write(chunk_data)
+
+        if chunk_index == total_chunks - 1:
+            # Assemble the final file in the uploads directory
+            final_file_path = os.path.join(settings.UPLD_DIR, file_name)
+            with open(final_file_path, 'wb+') as destination:
+                for i in range(total_chunks):
+                    chunk_file_path = os.path.join(
+                        CHUNK_UPLOAD_DIR, f'{file_name}.part{i}')
+                    with open(chunk_file_path, 'rb') as chunk_file:
+                        destination.write(chunk_file.read())
+                    os.remove(chunk_file_path)
+
+            # Open the assembled file for scanning
+            self.file = open(final_file_path, 'rb')
+            self.file.content_type = self.get_content_type(file_name)
+            self.file_type = FileType(self.file)
+            response_data = self.upload()  # Perform the upload process
+            return response_data
+        else:
+            return {'status': 'in_progress'}
+
+    def get_content_type(self, file_name):
+        import mimetypes
+        mime_type, _ = mimetypes.guess_type(file_name)
+        return mime_type or 'application/octet-stream'
+
+    def assemble_chunks(self, file_name, total_chunks):
+        file_path = os.path.join(settings.UPLD_DIR, file_name)
+        with open(file_path, 'wb+') as destination:
+            for i in range(total_chunks):
+                chunk_file_path = os.path.join(
+                    CHUNK_UPLOAD_DIR, f'{file_name}.part{i}')
+                with open(chunk_file_path, 'rb') as chunk_file:
+                    destination.write(chunk_file.read())
+                os.remove(chunk_file_path)
+        return file_path
+
+    def upload(self):
+        self.request.FILES['file'] = self.file
+        scanning = Scanning(self.request)
+        print(self.request.FILES['file'])
         content_type = self.file.content_type
         file_name = self.file.name
         logger.info('MIME Type: %s FILE: %s', content_type, file_name)
+
         if self.file_type.is_apk():
             return scanning.scan_apk()
         elif self.file_type.is_xapk():
@@ -338,7 +396,7 @@ def search(request):
         db_obj = RecentScansDB.objects.filter(MD5=md5)
         if db_obj.exists():
             e = db_obj[0]
-            url = f'/{e.ANALYZER }/{e.MD5}/'
+            url = f'/{e.ANALYZER}/{e.MD5}/'
             return HttpResponseRedirect(url)
         else:
             return HttpResponseRedirect('/not_found/')
